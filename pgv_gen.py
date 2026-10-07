@@ -54,16 +54,16 @@ def parse_csv(csv_path):
 def format_row(addr_index, pg_func=0x000, data=0, clk_m=0, clk_s=0, addr=0, scan_in=0, en_scan_in=0, rst_ckt=0, rst_cnt=0, en_scan_out=0):
 	"""將參數格式化為固定寬度並對齊，行尾附上從 0 開始的十六進位位址註解"""
 	part1 = f"{pg_func:03X}h"
-	part2 = f"{clk_m} {clk_s} {addr:>4} {scan_in} {en_scan_in} {rst_ckt} {rst_cnt} {en_scan_out}"
+	part2 = f"{clk_m} {clk_s} {addr:>4} {scan_in} {en_scan_in} {rst_ckt} {rst_cnt} {en_scan_out} {1 - en_scan_out}"
 	
 	# 利用固定寬度讓文字對齊，並確保每行附加上對齊的 16 進位行號註解
-	line = f"{part1:<6} {part2:<18}"
-	return f"{line:<24} // {addr_index:04X}h {addr_index:04}"
+	line = f"{part1:<6} {part2:<20}"
+	return f"{line:<26} // {addr_index:04X}h {addr_index:04}"
 
 def write_headers(f, total_bits, addr_index):
 	"""寫入 No Time Stamp 模式的標頭與腳位映射 (ASSIGN)"""
 	N = 0 if total_bits <= 1 else math.ceil(math.log2(total_bits)) - 1
-	f.write(f"INPUTS PG_Function CLK_M CLK_S addr scan_in EN_SCAN_IN RST_CKT RST_CNT EN_SCAN_OUT;\n")
+	f.write(f"INPUTS PG_Function CLK_M CLK_S addr scan_in EN_SCAN_IN RST_CKT RST_CNT EN_SCAN_OUT ENb_SCAN_OUT;\n")
 	f.write(f"ASSIGN addr 0..{N};\n")
 	f.write(f"ASSIGN CLK_M {N+1};\n")
 	f.write(f"ASSIGN CLK_S {N+2};\n")
@@ -72,6 +72,7 @@ def write_headers(f, total_bits, addr_index):
 	f.write(f"ASSIGN RST_CKT {N+5};\n")
 	f.write(f"ASSIGN RST_CNT {N+6};\n")
 	f.write(f"ASSIGN EN_SCAN_OUT {N+7};\n")
+	f.write(f"ASSIGN ENb_SCAN_OUT {N+8};\n")
 	f.write("RADIX AUTO;\n")
 	f.write("FREQUENCYMODE INTERNAL;\n")
 	f.write("FREQUENCY 1 MHz;\n")
@@ -138,6 +139,13 @@ def do_write(f, addr_index, bitstream):
 		f.write(format_row(addr_index, clk_m=clk_m, clk_s=clk_s, en_scan_in=0) + ' Load into circuit\n')
 		addr_index += 1
 
+	return addr_index
+
+def do_reset_cnt(f, addr_index):
+	for _ in range(10):
+			f.write(format_row(addr_index) + '\n')
+			addr_index += 1
+	
 	# reset counter
 	for _ in range(10):
 		f.write(format_row(addr_index, rst_ckt=0, rst_cnt=1) + '\n')
@@ -201,8 +209,8 @@ def do_wait(f, addr_index, wait_cycles, unit):
 def do_read(f, addr_index):
 	"""READ 階段：發送等量時脈週期但不 scan-in，用以將資料移出或驗證"""
 
-	for j in range(20):
-		clk_m_val = 1 if 3 <= j <=  6 else 0
+	for j in range(15):
+		clk_m_val = 1 if 3 <= j <= 6 else 0
 		clk_s_val = 1 if 8 <= j <= 11 else 0
 		f.write(format_row(addr_index, clk_m=clk_m_val, clk_s=clk_s_val) + '\n')
 		addr_index += 1
@@ -210,24 +218,37 @@ def do_read(f, addr_index):
 	for data_idx in range(4):
 		for bit_idx in range(40):
 			for row in range(10):
-				clk_m = 1 if 3 <= row <= 6 else 0
+				# clk_m = 1 if 3 <= row <= 6 else 0
 				if data_idx == 0 and bit_idx == 0:
+					clk_m = 0
 					clk_s = 1 if row in (8, 9) else 0
 				else:
+					clk_m = 1 if row in (3, 4, 5, 6) else 0
 					clk_s = 1 if row in (0, 1, 8, 9) else 0
-				addr = 9 - (bit_idx // 4) 
+				addr = 9 - ((bit_idx) // 4) 
 				f.write(format_row(addr_index, clk_m=clk_m, clk_s=clk_s, addr=addr, en_scan_out=1) + '\n')
 				addr_index += 1
 
-	f.write(format_row(addr_index, clk_m=0, clk_s=1, en_scan_out=1) + '\n')
-	addr_index += 1
-	f.write(format_row(addr_index, clk_m=0, clk_s=1, en_scan_out=1) + '\n')
-	addr_index += 1
+	for j in range(15):
+		clk_m_val = 1 if j in (3, 4, 5, 6) else 0
+		clk_s_val = 1 if j in (0, 1, 8, 9, 10, 11) else 0
+		f.write(format_row(addr_index, clk_m=clk_m_val, clk_s=clk_s_val,  en_scan_out=1) + '\n')
+		addr_index += 1
 	
 	# 收尾歸零
 	f.write(format_row(addr_index) + '\n')
 	addr_index += 1
 	return addr_index
+
+def do_jump(f, addr_index, jump_addr):
+	""" 啟用重複執行 """
+	print(f"[*] Jump back to: \t{jump_addr:d}d ({jump_addr:04X}h)")
+	f.write(format_row(addr_index, pg_func=0x800 + (jump_addr & 0xFF)) + ' JP: RL \n')        # MOV RL
+	addr_index += 1
+	f.write(format_row(addr_index, pg_func=0x200 + ((jump_addr >> 8) & 0xFF)) + ' JP: RH \n') # MOV RH
+	addr_index += 1
+	f.write(format_row(addr_index, pg_func=0x100) + f" JP: {jump_addr:04X}h\n")                                   # LP 執行跳轉並將 LC-1
+	addr_index += 1
 
 def main():
 	parser = argparse.ArgumentParser(description="Acute PGV Vector Generator (自動轉換 CSV 為 PGV)")
@@ -238,8 +259,9 @@ def main():
 	parser.add_argument('-RST', '--reset', action='store_true', help="包含 RESET 初始階段")
 	parser.add_argument('-W', '--write', action='store_true', help="包含 WRITE 資料掃入階段")
 	parser.add_argument('-R', '--read', action='store_true', help="包含 READ 資料讀出階段")
-	parser.add_argument('-t', '--wait', type=int, default=1000, help="設定 WRITE 後的等待時間 (例如 -t 10000/單位 -unit)")
-	parser.add_argument('-u', '--unit', type=int, default=10000, help="設定 WRITE 後的等待時間單位")
+	parser.add_argument('-t', '--wait', type=int, default=1000, help="設定 WRITE 後的等待時間 [例如 -t 10000 (單位 -unit)]")
+	parser.add_argument('-u', '--unit', type=int, default=10000, help="設定 WAIT 時間單位，例如：-t 1000 -u 1000 代表延遲 1 sec")
+	parser.add_argument('-j', '--jump', action='store_true', help="跳到 WAIT 迴圈前，執行重複掃描")
 	
 	args = parser.parse_args()
 
@@ -257,6 +279,7 @@ def main():
 	with open(args.output, 'w', encoding='utf-8') as f:
 		# 維護一個全域的位址索引
 		addr_index = 0
+		jump_addr = 0
 
 		addr_index = write_headers(f, total_bits, addr_index)
 		
@@ -265,13 +288,30 @@ def main():
 			
 		if args.write:
 			addr_index = do_write(f, addr_index, bitstream)
-			
+
+		addr_index = do_reset_cnt(f, addr_index)
+		
 		if args.write and args.read:
+			jump_addr = addr_index
 			addr_index = do_wait(f, addr_index, args.wait, args.unit)
-			
 		if args.read:
 			addr_index = do_read(f, addr_index)
-			
+		if args.jump and args.write and args.read:
+			addr_index = do_jump(f, addr_index, jump_addr + 10)
+
+		# Allow quick BER result accquiring before repeating read-out
+		# if args.read:
+		# 	addr_index = do_wait(f, addr_index, wait_cycles=400, unit=250)
+		# 	jump_addr = addr_index
+		# 	addr_index = do_read(f, addr_index)
+		# if args.write and args.read:
+		# 	addr_index = do_wait(f, addr_index, args.wait, args.unit)
+		# if args.jump and args.write and args.read:
+		# 	for _ in range(10):
+		# 		f.write(format_row(addr_index) + '\n')
+		# 		addr_index += 1
+		# 	addr_index = do_jump(f, addr_index, jump_addr + 10)
+		
 	print(f"[v] PGV file generated: {args.output}")
 	print(f"[*] Job done time: \t{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
